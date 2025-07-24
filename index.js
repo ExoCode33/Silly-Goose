@@ -372,22 +372,3 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 module.exports = MessageBot;
-
-// ===== .env.example =====
-# Copy this file to .env and fill in your values
-# On Railway, set these as environment variables instead
-
-DISCORD_TOKEN=your_discord_bot_token_here
-
-# ===== railway.json =====
-{
-  "$schema": "https://railway.app/railway.schema.json",
-  "build": {
-    "builder": "NIXPACKS"
-  },
-  "deploy": {
-    "startCommand": "npm start",
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
-  }
-}
