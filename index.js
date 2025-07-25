@@ -34,6 +34,8 @@ class MessageBot {
                     await this.handleStopCommand(interaction);
                 } else if (interaction.commandName === 'status') {
                     await this.handleStatusCommand(interaction);
+                } else if (interaction.commandName === 'check-english') {
+                    await this.handleCheckEnglishCommand(interaction);
                 }
             } catch (error) {
                 console.error('Error handling interaction:', error);
@@ -102,6 +104,29 @@ class MessageBot {
             new SlashCommandBuilder()
                 .setName('status')
                 .setDescription('View active message jobs in this server')
+                .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
+
+            new SlashCommandBuilder()
+                .setName('check-english')
+                .setDescription('Check and correct English mistakes in recent messages')
+                .addUserOption(option =>
+                    option.setName('user')
+                        .setDescription('The user whose messages to check (defaults to yourself)')
+                        .setRequired(false)
+                )
+                .addIntegerOption(option =>
+                    option.setName('limit')
+                        .setDescription('Number of recent messages to check (default: 10, max: 50)')
+                        .setRequired(false)
+                        .setMinValue(1)
+                        .setMaxValue(50)
+                )
+                .addChannelOption(option =>
+                    option.setName('channel')
+                        .setDescription('Channel to check messages from (defaults to current channel)')
+                        .setRequired(false)
+                        .addChannelTypes(ChannelType.GuildText)
+                )
                 .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages)
         ];
 
@@ -217,6 +242,179 @@ class MessageBot {
         }
 
         await interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    async handleCheckEnglishCommand(interaction) {
+        await interaction.deferReply({ ephemeral: true });
+
+        const targetUser = interaction.options.getUser('user') || interaction.user;
+        const limit = interaction.options.getInteger('limit') || 10;
+        const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+
+        // Check bot permissions
+        const botMember = interaction.guild.members.cache.get(this.client.user.id);
+        if (!targetChannel.permissionsFor(botMember).has([PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ViewChannel])) {
+            return interaction.editReply({
+                content: `❌ I don't have permission to read message history in ${targetChannel}. Please check my permissions.`
+            });
+        }
+
+        try {
+            // Fetch recent messages from the user
+            const messages = await targetChannel.messages.fetch({ limit: 100 });
+            const userMessages = messages
+                .filter(msg => msg.author.id === targetUser.id && !msg.author.bot && msg.content.trim().length > 0)
+                .first(limit);
+
+            if (userMessages.length === 0) {
+                const embed = new EmbedBuilder()
+                    .setColor(0xffa500)
+                    .setTitle('ℹ️ No Messages Found')
+                    .setDescription(`No recent messages found from ${targetUser.tag} in ${targetChannel}.`)
+                    .setTimestamp()
+                    .setFooter({ text: `Requested by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() });
+
+                return interaction.editReply({ embeds: [embed] });
+            }
+
+            // Analyze messages for English corrections
+            const corrections = [];
+            for (const msg of userMessages) {
+                const originalText = msg.content;
+                const correctedText = this.correctEnglish(originalText);
+                
+                if (originalText !== correctedText) {
+                    corrections.push({
+                        original: originalText,
+                        corrected: correctedText,
+                        timestamp: msg.createdAt,
+                        messageId: msg.id
+                    });
+                }
+            }
+
+            const embed = new EmbedBuilder()
+                .setColor(corrections.length > 0 ? 0xff9500 : 0x00ff00)
+                .setTitle(`📝 English Check Results for ${targetUser.displayName}`)
+                .setTimestamp()
+                .setFooter({ text: `Requested by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() });
+
+            if (corrections.length === 0) {
+                embed
+                    .setDescription(`✅ Great job! No English mistakes found in the last ${userMessages.length} messages from ${targetUser.tag}.`)
+                    .addFields({
+                        name: '📊 Summary',
+                        value: `**Messages checked:** ${userMessages.length}\n**Mistakes found:** 0`,
+                        inline: false
+                    });
+            } else {
+                embed.setDescription(`Found ${corrections.length} message(s) with potential English improvements:`);
+                
+                // Add corrections as fields (Discord has a limit of 25 fields)
+                const maxFields = Math.min(corrections.length, 10);
+                for (let i = 0; i < maxFields; i++) {
+                    const correction = corrections[i];
+                    const fieldValue = `**Original:** ${correction.original}\n**Suggested:** ${correction.corrected}`;
+                    
+                    embed.addFields({
+                        name: `Message ${i + 1}`,
+                        value: fieldValue.length > 1024 ? fieldValue.substring(0, 1021) + '...' : fieldValue,
+                        inline: false
+                    });
+                }
+
+                if (corrections.length > maxFields) {
+                    embed.addFields({
+                        name: '📋 Note',
+                        value: `Showing ${maxFields} out of ${corrections.length} corrections. Use a smaller limit to see fewer results.`,
+                        inline: false
+                    });
+                }
+
+                embed.addFields({
+                    name: '📊 Summary',
+                    value: `**Messages checked:** ${userMessages.length}\n**Messages with corrections:** ${corrections.length}`,
+                    inline: false
+                });
+            }
+
+            await interaction.editReply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in check-english command:', error);
+            await interaction.editReply({
+                content: '❌ An error occurred while checking English. Please make sure I have permission to read message history in the specified channel.'
+            });
+        }
+    }
+
+    correctEnglish(text) {
+        // Basic English correction rules
+        let corrected = text;
+
+        // Common grammar fixes
+        const corrections = [
+            // Capitalization
+            { pattern: /^[a-z]/, replacement: (match) => match.toUpperCase() }, // Start of sentence
+            { pattern: /\. [a-z]/g, replacement: (match) => match.toUpperCase() }, // After periods
+            { pattern: /\? [a-z]/g, replacement: (match) => match.toUpperCase() }, // After question marks
+            { pattern: /! [a-z]/g, replacement: (match) => match.toUpperCase() }, // After exclamation marks
+            
+            // Common word corrections
+            { pattern: /\bi\b/g, replacement: 'I' }, // Lowercase "i" should be "I"
+            { pattern: /\bim\b/gi, replacement: "I'm" }, // "im" should be "I'm"
+            { pattern: /\bcant\b/gi, replacement: "can't" }, // "cant" should be "can't"
+            { pattern: /\bdont\b/gi, replacement: "don't" }, // "dont" should be "don't"
+            { pattern: /\bwont\b/gi, replacement: "won't" }, // "wont" should be "won't"
+            { pattern: /\bisnt\b/gi, replacement: "isn't" }, // "isnt" should be "isn't"
+            { pattern: /\barent\b/gi, replacement: "aren't" }, // "arent" should be "aren't"
+            { pattern: /\bwasnt\b/gi, replacement: "wasn't" }, // "wasnt" should be "wasn't"
+            { pattern: /\bwerent\b/gi, replacement: "weren't" }, // "werent" should be "weren't"
+            { pattern: /\bhavent\b/gi, replacement: "haven't" }, // "havent" should be "haven't"
+            { pattern: /\bhasnt\b/gi, replacement: "hasn't" }, // "hasnt" should be "hasn't"
+            { pattern: /\bhadnt\b/gi, replacement: "hadn't" }, // "hadnt" should be "hadn't"
+            { pattern: /\bwouldnt\b/gi, replacement: "wouldn't" }, // "wouldnt" should be "wouldn't"
+            { pattern: /\bcouldnt\b/gi, replacement: "couldn't" }, // "couldnt" should be "couldn't"
+            { pattern: /\bshouldnt\b/gi, replacement: "shouldn't" }, // "shouldnt" should be "shouldn't"
+            { pattern: /\bmustnt\b/gi, replacement: "mustn't" }, // "mustnt" should be "mustn't"
+            { pattern: /\bdidnt\b/gi, replacement: "didn't" }, // "didnt" should be "didn't"
+            { pattern: /\bdoesnt\b/gi, replacement: "doesn't" }, // "doesnt" should be "doesn't"
+            
+            // Common spelling mistakes
+            { pattern: /\bteh\b/gi, replacement: 'the' },
+            { pattern: /\band\s+and\b/gi, replacement: 'and' }, // Double "and"
+            { pattern: /\bthe\s+the\b/gi, replacement: 'the' }, // Double "the"
+            { pattern: /\ba\s+a\b/gi, replacement: 'a' }, // Double "a"
+            { pattern: /\bto\s+to\b/gi, replacement: 'to' }, // Double "to"
+            { pattern: /\bof\s+of\b/gi, replacement: 'of' }, // Double "of"
+            { pattern: /\bin\s+in\b/gi, replacement: 'in' }, // Double "in"
+            { pattern: /\bfor\s+for\b/gi, replacement: 'for' }, // Double "for"
+            { pattern: /\bwith\s+with\b/gi, replacement: 'with' }, // Double "with"
+            { pattern: /\bon\s+on\b/gi, replacement: 'on' }, // Double "on"
+            { pattern: /\bat\s+at\b/gi, replacement: 'at' }, // Double "at"
+            { pattern: /\bby\s+by\b/gi, replacement: 'by' }, // Double "by"
+            { pattern: /\bfrom\s+from\b/gi, replacement: 'from' }, // Double "from"
+            { pattern: /\bup\s+up\b/gi, replacement: 'up' }, // Double "up"
+            { pattern: /\babout\s+about\b/gi, replacement: 'about' }, // Double "about"
+            { pattern: /\binto\s+into\b/gi, replacement: 'into' }, // Double "into"
+            { pattern: /\bover\s+over\b/gi, replacement: 'over' }, // Double "over"
+            { pattern: /\bafter\s+after\b/gi, replacement: 'after' }, // Double "after"
+            
+            // Extra spaces
+            { pattern: /\s+/g, replacement: ' ' }, // Multiple spaces to single space
+            { pattern: /\s+([,.!?;:])/g, replacement: '$1' }, // Space before punctuation
+            { pattern: /([,.!?;:])\s*([,.!?;:])/g, replacement: '$1 $2' }, // Space after punctuation
+        ];
+
+        // Apply corrections
+        corrections.forEach(rule => {
+            corrected = corrected.replace(rule.pattern, rule.replacement);
+        });
+
+        // Clean up extra spaces and trim
+        corrected = corrected.replace(/\s+/g, ' ').trim();
+
+        return corrected;
     }
 
     startMessageJob(jobId, channel, message, interval, count, user) {
